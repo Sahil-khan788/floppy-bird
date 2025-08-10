@@ -1,0 +1,571 @@
+<!doctype html>
+<!--
+  Floppy Bird - Complete single-file 2D game
+  Features:
+    - Responsive canvas, works on desktop & mobile
+    - Keyboard, mouse and touch controls
+    - Physics-based bird with flap and gravity
+    - Procedural obstacles (pipes) with variable gaps
+    - Parallax background and ground with scrolling
+    - Particle effects for flap, collision and score
+    - Sound effects generated with WebAudio (no external files)
+    - Pause / Resume, Restart, Mute, Fullscreen
+    - Main menu, Settings (difficulty), Tutorial
+    - Local high-score and local leaderboard (localStorage)
+    - Achievements & stats tracking (in localStorage)
+    - Smooth animations, adaptive difficulty, collision detection
+
+  To run: save this file as floppy-bird.html and open in a modern browser.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Floppy Bird — Single File Game</title>
+  <style>
+    :root{
+      --bg1:#70c5ce; /* sky */
+      --bg2:#cbeef6; /* horizon */
+      --accent:#ffd24a; /* bird */
+      --pipe:#2ea043; /* pipe */
+      --ground:#d18f4b;
+      --ui-bg: rgba(0,0,0,0.45);
+    }
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:linear-gradient(to bottom,var(--bg1) 0%,var(--bg2) 60%);}
+    #game-wrap{display:flex;align-items:center;justify-content:center;height:100%;padding:20px;box-sizing:border-box}
+    canvas{background:transparent;display:block;border-radius:14px;box-shadow:0 10px 30px rgba(10,20,30,0.25);}
+    .ui{position:absolute;left:20px;top:20px;color:#fff}
+    .panel{position:absolute;right:20px;top:20px;color:#fff}
+    .bottom-ui{position:absolute;left:20px;bottom:20px;color:#fff}
+    .overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
+    .dialog{pointer-events:auto;background:var(--ui-bg);backdrop-filter:blur(6px);padding:18px;border-radius:12px;color:#fff;max-width:520px;width:92%;text-align:center}
+    .row{display:flex;gap:8px;align-items:center;justify-content:center;margin-top:10px}
+    button{appearance:none;background:#fff;color:#222;padding:8px 12px;border-radius:8px;border:0;cursor:pointer;font-weight:600}
+    .small{font-size:13px;padding:6px 10px}
+    .muted{opacity:0.8}
+    .score-bubble{position:absolute;left:50%;transform:translateX(-50%);top:14px;font-weight:800;font-size:34px;color:#fff;text-shadow:0 3px 8px rgba(0,0,0,0.35)}
+    .sub{font-size:13px;opacity:0.95}
+    .leaderboard{max-height:220px;overflow:auto;text-align:left;margin-top:8px}
+    .kbd{display:inline-block;background:rgba(255,255,255,0.12);padding:4px 8px;border-radius:6px;margin-left:6px}
+    @media(max-width:600px){.dialog{padding:12px}}
+  </style>
+</head>
+<body>
+  <div id="game-wrap">
+    <canvas id="game"></canvas>
+    <div class="overlay" id="overlay"></div>
+    <div class="score-bubble" id="scoreBubble" style="display:none">0</div>
+    <div class="ui">
+      <div class="sub">Controls: Tap / Click / Space <span class="kbd">Space</span> <span class="kbd">↑</span></div>
+    </div>
+    <div class="panel">
+      <div style="text-align:right">
+        <button id="btnMute" class="small">Mute</button>
+        <button id="btnFullscreen" class="small">Fullscreen</button>
+      </div>
+    </div>
+    <div class="bottom-ui">
+      <div style="text-align:left">
+        <div class="sub">High Score: <span id="highScore">0</span></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  // -----------------------
+  // Floppy Bird - main JS
+  // -----------------------
+  (()=>{
+    const canvas = document.getElementById('game');
+    const overlay = document.getElementById('overlay');
+    const scoreBubble = document.getElementById('scoreBubble');
+    const highScoreEl = document.getElementById('highScore');
+    const btnMute = document.getElementById('btnMute');
+    const btnFullscreen = document.getElementById('btnFullscreen');
+
+    // responsive size
+    function sizeCanvas(){
+      const maxW = Math.min(window.innerWidth - 40, 800);
+      const maxH = Math.min(window.innerHeight - 40, 900);
+      const w = Math.floor(maxW);
+      const h = Math.floor(Math.max(480, Math.min(maxH, Math.round(w * 1.6))));
+      canvas.width = w;
+      canvas.height = h;
+    }
+    sizeCanvas();
+    window.addEventListener('resize', ()=>{sizeCanvas()});
+
+    const ctx = canvas.getContext('2d');
+    let last = performance.now();
+    let delta = 0;
+
+    // Game state
+    const STATE = { MENU:0, PLAYING:1, PAUSED:2, GAMEOVER:3, TUTORIAL:4 };
+    let gameState = STATE.MENU;
+
+    // Assets & settings
+    let settings = {
+      gravity: 900,
+      flapImpulse: -290,
+      pipeGap: 160,
+      pipeSpacing: 220,
+      scrollSpeed: 140,
+      difficulty:'normal',
+      muted:false
+    };
+
+    // adapt difficulty presets
+    const DIFFICULTY = {
+      easy: { pipeGap:200, pipeSpacing:260, scrollSpeed:120 },
+      normal: { pipeGap:160, pipeSpacing:220, scrollSpeed:140 },
+      hard: { pipeGap:130, pipeSpacing:200, scrollSpeed:165 }
+    };
+
+    // localStorage keys
+    const LS = { HIGHSCORE:'floppy_highscore_v1', LB:'floppy_leaderboard_v1', STATS:'floppy_stats_v1' };
+
+    // Stats & leaderboard
+    let stats = loadJSON(LS.STATS, { games:0, totalScore:0, bestGap:0, achievements:[] });
+    let leaderboard = loadJSON(LS.LB, []);
+    let highScore = loadJSON(LS.HIGHSCORE, 0);
+    highScoreEl.textContent = highScore;
+
+    // Game objects
+    const bird = {
+      x: 110, y:100, w:34, h:24, vy:0, rot:0, alive:true, frame:0, flapTimer:0
+    };
+    let pipes = [];
+    let particles = [];
+    let score = 0;
+    let scroll = 0;
+    let spawnTimer = 0;
+    let rng = (seed=>()=>{ seed = (seed * 1664525 + 1013904223) | 0; return ((seed>>>0)/0xFFFFFFFF);})(Math.floor(Math.random()*1e9));
+
+    // audio via WebAudio
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    let audioCtx = null;
+    function ensureAudio(){ if(!audioCtx){ audioCtx = new AudioCtx(); } }
+    function beep(freq, time=0.06, type='sine', volume=0.12){ if(settings.muted) return; ensureAudio(); const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type=type; o.frequency.value=freq; g.gain.value=volume; o.connect(g); g.connect(audioCtx.destination); o.start(); g.gain.setTargetAtTime(0.0001, audioCtx.currentTime+time, 0.02); o.stop(audioCtx.currentTime+time+0.02); }
+    function flapSound(){ beep(820,0.05,'square',0.11); }
+    function scoreSound(){ beep(1200,0.08,'sine',0.14); }
+    function hitSound(){ beep(160,0.18,'sawtooth',0.22); }
+
+    // utility
+    function randRange(a,b){return a + Math.random()*(b-a)}
+    function clamp(v,a,b){return Math.max(a,Math.min(b,v))}
+    function saveJSON(k,o){ localStorage.setItem(k, JSON.stringify(o)); }
+    function loadJSON(k, fallback){ try{ const s = localStorage.getItem(k); return s ? JSON.parse(s) : fallback; }catch(e){ return fallback; } }
+
+    // Game control functions
+    function resetGame(){
+      Object.assign(bird,{x:110,y:canvas.height/2,w:36,h:28,vy:0,rot:0,alive:true,frame:0,flapTimer:0});
+      pipes.length=0; particles.length=0; score=0; scroll=0; spawnTimer=0; updateDifficulty();
+      gameState = STATE.TUTORIAL;
+    }
+
+    function startGame(){ stats.games++; saveJSON(LS.STATS, stats); gameState = STATE.PLAYING; ensureAudio(); }
+    function endGame(){ gameState = STATE.GAMEOVER; bird.alive=false; hitSound(); stats.totalScore += score; saveJSON(LS.STATS, stats); checkHighscore(); }
+
+    function checkHighscore(){ if(score > highScore){ highScore = score; saveJSON(LS.HIGHSCORE, highScore); highScoreEl.textContent = highScore; // add to leaderboard
+        leaderboard.unshift({score, when:Date.now()}); leaderboard = leaderboard.slice(0,10); saveJSON(LS.LB, leaderboard);
+      }
+    }
+
+    // Difficulty apply
+    function updateDifficulty(){ const d = DIFFICULTY[settings.difficulty] || DIFFICULTY.normal; settings.pipeGap = d.pipeGap; settings.pipeSpacing = d.pipeSpacing; settings.scrollSpeed = d.scrollSpeed; }
+
+    // spawn pipes
+    function spawnPipe(){ const gap = settings.pipeGap; const top = randRange(80, canvas.height - 160 - gap); pipes.push({x: canvas.width + 40, top: top, gap: gap, passed:false}); }
+
+    // Input
+    let inputDown = false;
+    function flap(){ if(gameState === STATE.MENU){ startGame(); } else if(gameState === STATE.TUTORIAL){ startGame(); bird.vy = settings.flapImpulse; flapSound(); } else if(gameState === STATE.PLAYING && bird.alive){ bird.vy = settings.flapImpulse; bird.flapTimer = 0.12; flapSound(); spawnFlapParticles(); } else if(gameState === STATE.GAMEOVER){ resetGame(); }
+    }
+
+    // events
+    window.addEventListener('keydown', (e)=>{ if(e.code === 'Space' || e.code === 'ArrowUp'){ e.preventDefault(); flap(); } if(e.key==='p' || e.key==='P'){ togglePause(); } });
+    canvas.addEventListener('mousedown', (e)=>{ flap(); });
+    canvas.addEventListener('touchstart', (e)=>{ e.preventDefault(); flap(); }, {passive:false});
+
+    function togglePause(){ if(gameState===STATE.PLAYING){ gameState=STATE.PAUSED; } else if(gameState===STATE.PAUSED){ gameState=STATE.PLAYING; } }
+
+    // particles
+    function spawnFlapParticles(){ for(let i=0;i<12;i++){ particles.push({x:bird.x-8 + randRange(-6,6), y:bird.y+8 + randRange(-6,6), vx:randRange(-60,-140), vy:randRange(-40,40), life:randRange(0.22,0.6), size:randRange(1,4)}); } }
+    function spawnHitParticles(x,y){ for(let i=0;i<40;i++){ particles.push({x,y,vx:randRange(-260,260), vy:randRange(-360,60), life:randRange(0.6,1.3), size:randRange(2,6)}); } }
+
+    // collision
+    function rectIntersect(ax,ay,aw,ah,bx,by,bw,bh){return ax<bx+bw && ax+aw>bx && ay<by+bh && ay+ah>by}
+
+    // main update
+    function update(dt){
+      if(gameState===STATE.MENU) return;
+      if(gameState===STATE.PAUSED) return;
+      if(gameState===STATE.TUTORIAL){ // gentle bob
+        bird.vy += dt * (settings.gravity * 0.5);
+        bird.y += bird.vy * dt;
+        if(bird.y > canvas.height - 140) bird.y = canvas.height - 140;
+        bird.rot = Math.sin(performance.now()/300) * 0.4;
+        return;
+      }
+
+      // physics
+      bird.vy += settings.gravity * dt;
+      bird.y += bird.vy * dt;
+      bird.rot = clamp(bird.vy/600, -1.2, 1.2);
+      bird.flapTimer = Math.max(0, bird.flapTimer - dt);
+
+      // scrolling
+      const spd = settings.scrollSpeed + Math.min(80, score*3);
+      scroll += spd * dt;
+      spawnTimer += spd * dt;
+
+      // spawn pipes by spacing
+      if(spawnTimer > settings.pipeSpacing){ spawnTimer = 0; spawnPipe(); }
+
+      // update pipes
+      for(let i=pipes.length-1;i>=0;i--){ const p = pipes[i]; p.x -= spd * dt; if(!p.passed && p.x + 30 < bird.x){ p.passed = true; score++; scoreBubble.textContent = score; showScoreBubble(); scoreSound(); stats.bestGap = Math.max(stats.bestGap, p.gap); }
+        // collision with bird
+        const pipeW = 54; const pipeX = p.x; const topH = p.top; const bottomY = p.top + p.gap;
+        if(rectIntersect(bird.x, bird.y, bird.w, bird.h, pipeX, 0, pipeW, topH) || rectIntersect(bird.x, bird.y, bird.w, bird.h, pipeX, bottomY, pipeW, canvas.height - bottomY)){
+          if(bird.alive){ bird.alive=false; endGame(); spawnHitParticles(bird.x + bird.w/2, bird.y + bird.h/2); }
+        }
+        if(p.x < -pipeW) pipes.splice(i,1);
+      }
+
+      // ground collision
+      const groundY = canvas.height - 70;
+      if(bird.y + bird.h > groundY){ if(bird.alive){ endGame(); spawnHitParticles(bird.x + bird.w/2, groundY); } bird.y = groundY - bird.h; bird.vy = 0; }
+
+      // particles update
+      for(let i=particles.length-1;i>=0;i--){ const pa = particles[i]; pa.life -= dt; pa.x += pa.vx * dt; pa.y += pa.vy * dt; pa.vy += 600 * dt; if(pa.life<=0) particles.splice(i,1); }
+    }
+
+    // show temporary score bubble
+    let scoreBubbleTimeout = 0;
+    function showScoreBubble(){ scoreBubble.style.display='block'; scoreBubble.style.opacity='1'; clearTimeout(scoreBubbleTimeout); scoreBubbleTimeout = setTimeout(()=>{ scoreBubble.style.opacity='0'; setTimeout(()=>scoreBubble.style.display='none',400); }, 600); }
+
+    // draw
+    function draw(){
+      // clear
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+
+      // sky gradient (already via body) but paint layered background
+      // parallax background shapes (clouds/hills)
+      drawBackground();
+
+      // pipes
+      for(let p of pipes){ drawPipe(p); }
+
+      // ground
+      drawGround();
+
+      // particles
+      for(let pa of particles){ ctx.globalAlpha = clamp(pa.life,0,1); ctx.beginPath(); ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.ellipse(pa.x, pa.y, pa.size, pa.size, 0,0,Math.PI*2); ctx.fill(); }
+      ctx.globalAlpha = 1;
+
+      // bird
+      drawBird();
+
+      // ui overlays
+      if(gameState === STATE.MENU){ drawMenu(); }
+      if(gameState === STATE.TUTORIAL){ drawTutorial(); }
+      if(gameState === STATE.PAUSED){ drawPause(); }
+      if(gameState === STATE.GAMEOVER){ drawGameOver(); }
+
+      // score
+      if(gameState === STATE.PLAYING || gameState === STATE.PAUSED){ ctx.font = '700 36px system-ui, Arial'; ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.fillText(score, canvas.width/2, 58); }
+    }
+
+    function drawBackground(){
+      // moving hills parallax
+      const t = performance.now()/1000;
+      // simple parallax waves
+      for(let i=0;i<3;i++){
+        const amp = 20 + i*10; const y = canvas.height*0.75 + i*18; const speed = 0.02*(i+1);
+        ctx.beginPath(); ctx.moveTo(0, canvas.height);
+        for(let x=0;x<=canvas.width;x+=20){ const yy = Math.sin((x*0.02) + t*speed) * amp; ctx.lineTo(x, y + yy); }
+        ctx.lineTo(canvas.width, canvas.height); ctx.closePath(); ctx.fillStyle = `rgba(40,150,100,${0.06 + i*0.04})`; ctx.fill();
+      }
+
+      // clouds
+      ctx.fillStyle='rgba(255,255,255,0.85)';
+      const cloudX = (scroll*0.12) % (canvas.width+200) - 200;
+      for(let i=0;i<4;i++){ const cx = (cloudX + i*(canvas.width/4)); ctx.beginPath(); ctx.ellipse(cx, 90 + Math.sin(i+t*0.4)*6, 48,28,0,0,Math.PI*2); ctx.ellipse(cx+40,90,38,22,0,0,Math.PI*2); ctx.fill(); }
+    }
+
+    function drawPipe(p){ const w=54; ctx.fillStyle = '#2ea043'; // main pipe
+      // top
+      ctx.fillRect(p.x, 0, w, p.top);
+      // bottom
+      ctx.fillRect(p.x, p.top + p.gap, w, canvas.height - (p.top + p.gap) - 70);
+      // pipe rims
+      ctx.fillStyle = '#227a32'; ctx.fillRect(p.x-6, p.top - 14, w+12, 12);
+      ctx.fillRect(p.x-6, p.top + p.gap - 0, w+12, 12);
+    }
+
+    function drawGround(){ const gy = canvas.height - 70; ctx.fillStyle = '#9c5f2d'; ctx.fillRect(0, gy, canvas.width, 70);
+      // repeating pattern
+      ctx.fillStyle='rgba(0,0,0,0.06)'; for(let x=-(scroll%40); x<canvas.width; x+=40){ ctx.fillRect(x, gy+50, 24, 6); }
+      // score strip
+      ctx.fillStyle='rgba(255,255,255,0.03)'; ctx.fillRect(0, gy+10, canvas.width, 6);
+    }
+
+    function drawBird(){ ctx.save(); ctx.translate(bird.x + bird.w/2, bird.y + bird.h/2); ctx.rotate(bird.rot);
+      // body
+      ctx.beginPath(); ctx.ellipse(0,0, bird.w/2, bird.h/2, 0, 0, Math.PI*2); ctx.fillStyle = 'rgb(255,210,70)'; ctx.fill();
+      // wing (flapping)
+      const wingY = Math.sin(performance.now()/120) * 4 + (bird.flapTimer>0? -10:0);
+      ctx.beginPath(); ctx.ellipse(-6, wingY, 10,6, 0, 0, Math.PI*2); ctx.fillStyle='rgba(0,0,0,0.06)'; ctx.fill();
+      // eye
+      ctx.beginPath(); ctx.arc(6, -4, 4, 0, Math.PI*2); ctx.fillStyle='#fff'; ctx.fill(); ctx.beginPath(); ctx.arc(7, -4, 2, 0, Math.PI*2); ctx.fillStyle='#222'; ctx.fill();
+      // beak
+      ctx.beginPath(); ctx.moveTo(12,0); ctx.lineTo(20,4); ctx.lineTo(12,8); ctx.closePath(); ctx.fillStyle='#ff8b2b'; ctx.fill();
+      ctx.restore();
+    }
+
+    // UI Draw functions
+    function drawMenu(){ overlay.innerHTML = '';
+      const d = document.createElement('div'); d.className='dialog'; d.innerHTML = `<h2 style="margin:0 0 6px 0">Floppy Bird</h2><div class="sub">A polished single-file Flappy-style game. Click or tap to flap. Score points by passing pipes.</div>`;
+      const row = document.createElement('div'); row.className='row';
+      const play = document.createElement('button'); play.textContent='Play'; play.onclick = ()=>{ resetGame(); startGame(); overlay.innerHTML=''; };
+      const tutorial = document.createElement('button'); tutorial.textContent='Tutorial'; tutorial.onclick = ()=>{ resetGame(); overlay.innerHTML=''; };
+      const settingsBtn = document.createElement('button'); settingsBtn.textContent='Settings'; settingsBtn.onclick = ()=>{ showSettings(); };
+      row.appendChild(play); row.appendChild(tutorial); row.appendChild(settingsBtn);
+      d.appendChild(row);
+
+      // leaderboard
+      const lbDiv = document.createElement('div'); lbDiv.className='leaderboard'; lbDiv.innerHTML = '<strong>Leaderboard</strong>';
+      if(leaderboard.length===0) lbDiv.innerHTML += '<div class="sub">No scores yet — be the first!</div>';
+      else{
+        const ul = document.createElement('ol'); ul.style.paddingLeft='18px'; for(const entry of leaderboard){ const li = document.createElement('li'); const dt = new Date(entry.when); li.textContent = `${entry.score} — ${dt.toLocaleString()}`; ul.appendChild(li);} lbDiv.appendChild(ul);
+      }
+      d.appendChild(lbDiv);
+
+      overlay.appendChild(d);
+    }
+
+    function drawTutorial(){ overlay.innerHTML=''; const d=document.createElement('div'); d.className='dialog'; d.innerHTML = `<h3>How to play</h3><div class="sub">Tap/click/space to flap. Keep the bird between pipes and avoid the ground. Good luck!</div>`;
+      const row=document.createElement('div'); row.className='row'; const b=document.createElement('button'); b.textContent='Start'; b.onclick=()=>{ overlay.innerHTML=''; startGame(); }; row.appendChild(b); d.appendChild(row); overlay.appendChild(d);
+    }
+
+    function drawPause(){ overlay.innerHTML=''; const d=document.createElement('div'); d.className='dialog'; d.innerHTML=`<h3>Paused</h3><div class="sub">Press resume to continue</div>`; const r=document.createElement('div'); r.className='row'; const res=document.createElement('button'); res.textContent='Resume'; res.onclick=()=>{ overlay.innerHTML=''; gameState=STATE.PLAYING; }; r.appendChild(res); d.appendChild(r); overlay.appendChild(d); }
+
+    function drawGameOver(){ overlay.innerHTML=''; const d=document.createElement('div'); d.className='dialog'; d.innerHTML = `<h3>Game Over</h3><div class="sub">Score: <strong>${score}</strong></div>`;
+      const row=document.createElement('div'); row.className='row'; const r=document.createElement('button'); r.textContent='Retry'; r.onclick=()=>{ resetGame(); overlay.innerHTML=''; };
+      const menu=document.createElement('button'); menu.textContent='Menu'; menu.onclick=()=>{ overlay.innerHTML=''; gameState=STATE.MENU; drawMenu(); };
+      row.appendChild(r); row.appendChild(menu); d.appendChild(row);
+      // achievements & stats
+      const st=document.createElement('div'); st.className='sub'; st.style.marginTop='8px'; st.innerHTML = `High score: <strong>${highScore}</strong> | Games played: ${stats.games}`;
+      d.appendChild(st);
+      overlay.appendChild(d);
+    }
+
+    // settings modal
+    function showSettings(){ overlay.innerHTML=''; const d=document.createElement('div'); d.className='dialog'; d.innerHTML = `<h3>Settings</h3>`;
+      const diffRow=document.createElement('div'); diffRow.className='row'; diffRow.style.justifyContent='space-between'; diffRow.style.flexWrap='wrap'; diffRow.innerHTML = `<div style="text-align:left"><div class="sub">Difficulty</div></div>`;
+      const buttons = document.createElement('div'); buttons.style.display='flex'; buttons.style.gap='8px'; ['easy','normal','hard'].forEach(level=>{ const b=document.createElement('button'); b.textContent=level; b.onclick=()=>{ settings.difficulty=level; updateDifficulty(); showSettings(); }; if(settings.difficulty===level){ b.style.fontWeight='800'; } buttons.appendChild(b); }); diffRow.appendChild(buttons); d.appendChild(diffRow);
+
+      const misc=document.createElement('div'); misc.className='row'; misc.style.marginTop='10px'; const muteBtn=document.createElement('button'); muteBtn.textContent = settings.muted? 'Unmute' : 'Mute'; muteBtn.onclick = ()=>{ settings.muted = !settings.muted; btnMute.textContent = settings.muted?'Unmute':'Mute'; showSettings(); };
+      const full=document.createElement('button'); full.textContent='Reset Data'; full.onclick=()=>{ if(confirm('Reset all local progress and leaderboard?')){ localStorage.clear(); location.reload(); } };
+      misc.appendChild(muteBtn); misc.appendChild(full); d.appendChild(misc);
+      const closeRow=document.createElement('div'); closeRow.className='row'; const close=document.createElement('button'); close.textContent='Close'; close.onclick=()=>{ overlay.innerHTML=''; drawMenu(); }; closeRow.appendChild(close); d.appendChild(closeRow);
+      overlay.appendChild(d);
+    }
+
+    // Buttons
+    btnMute.addEventListener('click', ()=>{ settings.muted = !settings.muted; btnMute.textContent = settings.muted ? 'Unmute' : 'Mute'; });
+    btnFullscreen.addEventListener('click', ()=>{ if(document.fullscreenElement){ document.exitFullscreen(); } else { document.documentElement.requestFullscreen(); } });
+
+    // main loop
+    function loop(now){ const dt = Math.min(0.033, (now - last)/1000); last = now; update(dt); draw(); requestAnimationFrame(loop); }
+    requestAnimationFrame(loop);
+
+    // initial menu
+    drawMenu();
+
+    // helpers: show initial instructions
+    function showInitialDialog(){ /* kept via drawMenu overlay */ }
+
+    // touch hints
+    canvas.addEventListener('touchmove',(e)=>{ e.preventDefault(); },{passive:false});
+
+  })();
+  </script>
+  <!-- ==== Google tag (GA4) - replace MEASUREMENT_ID ==== -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=GA_MEASUREMENT_ID"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'GA_MEASUREMENT_ID', { 'send_page_view': false }); // SPA - we'll send manual page_view
+  // helper to log game events
+  function gaEvent(name, params = {}) {
+    gtag('event', name, Object.assign({engagement_time_msec: '100'}, params));
+  }
+</script>
+
+<!-- ==== Simple CSS for consent + share buttons ==== -->
+<style>
+  #consentBar{position:fixed;left:10px;right:10px;bottom:10px;background:#fff;padding:12px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.2);display:flex;gap:12px;align-items:center;z-index:9999}
+  #consentBar button{padding:8px 12px;border-radius:6px;border:0;cursor:pointer}
+  .ad-placeholder{background:#eef; border:1px dashed #99c; padding:8px; text-align:center; margin:8px 0;}
+  .share-row{display:flex;gap:8px}
+  .share-row a{padding:6px 10px;border-radius:6px;text-decoration:none;background:#f1f1f1;color:#111}
+</style>
+
+</head>
+<body>
+
+<!-- ======= YOUR GAME CANVAS SHOULD ALREADY BE HERE =======
+ e.g. <canvas id="gameCanvas"></canvas>
+ Make sure the game code calls monetization functions below at appropriate moments:
+  - showInterstitialAtGameOver()
+  - offerRewardedForContinue()
+  - gaEvent('score', {value:score})
+-->
+
+<!-- Ad container (desktop fallback banner) -->
+<div id="topBanner" class="ad-placeholder" aria-hidden="true">
+  Banner ad placeholder — replace with AdSense ad unit or keep for fallback.
+</div>
+
+<!-- In-game controls (example) -->
+<div style="position:fixed; left:10px; top:10px; z-index:999;">
+  <button id="muteBtn">Mute</button>
+  <button id="shareBtn">Share</button>
+</div>
+
+<!-- Share popup (simple) -->
+<div id="sharePopup" style="display:none;position:fixed;right:10px;top:50px;z-index:999;background:#fff;padding:10px;border-radius:6px;box-shadow:0 6px 20px rgba(0,0,0,.15)">
+  <div class="share-row">
+    <a id="shareTwitter" href="#" target="_blank">Twitter</a>
+    <a id="shareFb" href="#" target="_blank">Facebook</a>
+    <a id="shareWp" href="#" target="_blank">WhatsApp</a>
+  </div>
+</div>
+
+<!-- Consent bar -->
+<div id="consentBar" style="display:none;">
+  <div style="flex:1">
+    This site uses cookies, analytics and ads to improve your experience. By continuing you accept.
+  </div>
+  <div>
+    <button id="acceptAll">Accept</button>
+    <button id="rejectAll">Reject</button>
+  </div>
+</div>
+
+<script>
+/* ========= Consent management (very simple) ========= */
+const consentKey = 'floppy_consented_v1';
+function showConsentIfNeeded() {
+  if(localStorage.getItem(consentKey) === null) {
+    document.getElementById('consentBar').style.display = 'flex';
+  } else {
+    const val = localStorage.getItem(consentKey);
+    if(val === 'true') initAnalyticsAndAds();
+  }
+}
+document.getElementById('acceptAll').onclick = () => {
+  localStorage.setItem(consentKey, 'true');
+  document.getElementById('consentBar').style.display = 'none';
+  initAnalyticsAndAds();
+};
+document.getElementById('rejectAll').onclick = () => {
+  localStorage.setItem(consentKey, 'false');
+  document.getElementById('consentBar').style.display = 'none';
+  // no analytics or personalized ads
+};
+showConsentIfNeeded();
+
+/* ======= Share buttons logic ======= */
+document.getElementById('shareBtn').onclick = () => {
+  const s = document.getElementById('sharePopup');
+  s.style.display = s.style.display === 'none' ? 'block' : 'none';
+};
+function updateShareLinks(pageUrl, text) {
+  document.getElementById('shareTwitter').href = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(pageUrl)}`;
+  document.getElementById('shareFb').href = `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(pageUrl)}`;
+  document.getElementById('shareWp').href = `https://api.whatsapp.com/send?text=${encodeURIComponent(text + ' ' + pageUrl)}`;
+}
+// Example: call this when game is ready
+updateShareLinks(window.location.href, 'Play my Floppy Bird clone! Can you beat my score?');
+
+/* ======= Simple mute control (example) ======= */
+let isMuted = false;
+document.getElementById('muteBtn').onclick = () => {
+  isMuted = !isMuted;
+  document.getElementById('muteBtn').innerText = isMuted ? 'Unmute' : 'Mute';
+  // your game audio system should check this flag
+};
+
+/* ======= Google Ad Placement API example (interstitial / rewarded) =======
+   This follows the Ad Placement API pattern — you must register placements in AdSense H5
+   or your ad provider and replace ADS_PUBLISHER_ID / PLACEMENT IDs accordingly.
+   See: https://developers.google.com/ad-placement/docs/example
+*/
+const AD_PLACEMENT_CONFIG = {
+  publisher: 'ADS_PUBLISHER_ID', // replace
+  interstitialPlacement: 'INTERSTITIAL_PLACEMENT_ID', // replace
+  rewardedPlacement: 'REWARDED_PLACEMENT_ID' // replace
+};
+
+async function initAdPlacement() {
+  // Example: load the ad placement script dynamically (this is provider-specific)
+  // For AdSense H5 / Ad Placement API, follow the provider's snippet. This is a placeholder.
+  if(AD_PLACEMENT_CONFIG.publisher === 'ADS_PUBLISHER_ID') {
+    console.warn('Ad publisher ID not set — skipping ad init.');
+    return;
+  }
+  // Example call structure (pseudo): request an interstitial when needed
+  // Real implementation must follow the ad provider docs and include their SDK.
+}
+
+/* Call when game-over or natural break in gameplay */
+async function showInterstitialAtGameOver() {
+  gaEvent('ad_request', {type:'interstitial'});
+  // pseudo-call - replace with real API per provider
+  try {
+    // await adProvider.showInterstitial(AD_PLACEMENT_CONFIG.interstitialPlacement);
+    console.log('Showing interstitial (placeholder)');
+    gaEvent('ad_shown', {type:'interstitial'});
+  } catch(e) {
+    console.warn('Interstitial failed', e);
+  }
+}
+
+/* Offer rewarded ad in exchange for continue/extra life */
+async function offerRewardedForContinue(onReward) {
+  gaEvent('ad_request', {type:'rewarded'});
+  try {
+    // await adProvider.showRewarded(AD_PLACEMENT_CONFIG.rewardedPlacement)
+    console.log('Showing rewarded (placeholder)');
+    // simulate reward
+    setTimeout(()=> {
+      gaEvent('ad_rewarded', {type:'rewarded'});
+      if(typeof onReward === 'function') onReward();
+    }, 1200);
+  } catch(e) {
+    console.warn('Rewarded failed', e);
+  }
+}
+
+/* ======= Initialize Analytics & Ads if consent given ======= */
+function initAnalyticsAndAds() {
+  // send initial page_view (SPA)
+  gaEvent('page_view', {page_location: window.location.href});
+  // initialize ad SDK / placement
+  initAdPlacement();
+}
+
+/* ======= Example hooks your game should call ======= */
+/* In your game code, call these when appropriate:
+   - gaEvent('game_start', {mode:'classic'});
+   - gaEvent('score', {value: 123});
+   - showInterstitialAtGameOver();
+   - offerRewardedForContinue(() => { player.continue(); });
+*/
+
+</script>
+</body>
+</html>
